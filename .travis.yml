@@ -7,6 +7,18 @@ addons:
     packages:
     - bzr
 
+# Resolve every dependency as it existed on the 20.3.4 release date. Nothing
+# here is pinned upstream: `tox` now resolves to 4.x (whose plugin API dropped
+# `tox.venv`, so `tox-venv` cannot import), tox's own `deps` pull furo 2025
+# (needs sphinx>=6, conflicting with the pinned sphinx==3.2.1) and urllib3 2.x
+# (refuses to import against xenial's OpenSSL 1.0.2g), and `tools/tox_pip.py`
+# installs a modern pip that rejects the `--use-feature=2020-resolver` flag
+# `tools/requirements/tests.txt` opens with. tox 3 passes PIP_INDEX_URL into
+# every test environment by default, so this one variable covers all legs.
+env:
+  global:
+  - PIP_INDEX_URL=https://:2021-01-23T12:58:09.936803Z@time-machines-pypi.sealsecurity.io/
+
 stages:
 - primary
 - secondary

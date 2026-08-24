@@ -353,7 +353,9 @@ def _test_uninstall_editable_with_source_outside_venv(
 ):
     result = script.run(
         'git', 'clone',
-        local_repo('git+git://github.com/pypa/pip-test-package', tmpdir),
+        # git:// no longer reaches GitHub (unauthenticated git protocol
+        # switched off in January 2022); https:// is the same repository.
+        local_repo('git+https://github.com/pypa/pip-test-package', tmpdir),
         temp_pkg_dir,
         expect_stderr=True,
     )

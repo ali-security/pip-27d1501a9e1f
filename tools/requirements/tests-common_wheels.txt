@@ -5,7 +5,25 @@
 # 4. Replacing the `setuptools` entry below with a `file:///...` URL
 # (Adjust artifact directory used based on preference and operating system)
 
-setuptools >= 40.8.0
-wheel
+# These wheels are installed INTO the per-test environments, so they are the
+# setuptools/wheel that build every fixture package the suite installs -- which
+# makes their versions observable in the assertions.
+#
+# Unbounded, `setuptools >= 40.8.0` resolves to a present-day setuptools
+# through the live-PyPI extra index, and modern setuptools normalises
+# distribution names in the metadata directory it writes: the FSPkg fixture
+# then installs as `fspkg-0.1.dev0.dist-info` where the suite asserts
+# `FSPkg-0.1.dev0` (test_install.py's test_install_curdir /
+# test_basic_install_from_local_directory / test_install_pardir /
+# test_basic_install_relative_directory / test_url_*_case*,
+# test_install_reqs.py's test_requirements_file, and the easy-install
+# assertions in test_uninstall.py). An upper bound rather than an exact pin, so
+# every interpreter still resolves: py2.7 gets 44.1.1, py3.5 gets 50.3.2 and
+# py3.6+ gets 51.3.3, the release the release-date index serves.
+setuptools>=40.8.0,<52
+# Same reasoning, and the release the release-date index serves: the name of
+# the .dist-info a built wheel unpacks to, and the WHEEL `Generator:` line the
+# suite reads back, both come from whatever wheel is installed here.
+wheel==0.36.2
 # As required by pytest-cov.
 coverage >= 4.4

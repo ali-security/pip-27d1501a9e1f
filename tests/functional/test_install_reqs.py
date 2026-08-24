@@ -1,5 +1,6 @@
 import json
 import os
+import sys
 import textwrap
 
 import pytest
@@ -361,6 +362,17 @@ def test_constraints_local_editable_install_causes_error(
         assert 'No matching distribution found' in result.stderr, str(result)
 
 
+# This test downloads `setuptools` and `wheel` from PyPI and then builds an
+# editable PEP 518 project against exactly what it got. On 3.7+ that download
+# is a present-day setuptools, whose build-env install fails against the
+# 2021-era build requirements this fixture declares. The interpreters the
+# Travis legs use (2.7 / 3.5 / 3.6 / pypy) can only resolve setuptools of the
+# era, so the test still runs there against the tooling upstream tested with.
+@pytest.mark.skipif(
+    sys.version_info >= (3, 7),
+    reason="downloads a present-day setuptools the 2021 fixture cannot build "
+           "against",
+)
 @pytest.mark.network
 def test_constraints_local_editable_install_pep518(script, data):
     to_install = data.src.joinpath("pep518-3.0")

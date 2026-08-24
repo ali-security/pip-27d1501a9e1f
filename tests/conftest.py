@@ -30,6 +30,20 @@ if MYPY_CHECK_RUNNING:
     from tests.lib.server import MockServer as _MockServer
     from tests.lib.server import Responder
 
+# This build exports PIP_INDEX_URL (and, on the GitHub legs,
+# PIP_EXTRA_INDEX_URL) so the 2021-era test dependencies still resolve, but
+# every PIP_* variable is also configuration for the pip under test: they
+# change the "Looking in indexes:" banner, the --index-url default printed by
+# `pip help`, the precedence a config file is weighed against, and the set of
+# entries tests/unit/test_configuration.py expects an environment to
+# contribute. The suite asserts on all of those, and those assertions only
+# hold for an unconfigured pip, which is what upstream CI ran. Dropping the
+# whole PIP_* namespace here covers both the in-process `in_memory_pip` calls
+# and the subprocesses that inherit this environment; tox has already
+# installed the dependencies by now, so nothing downstream still needs them.
+for _pip_env_var in [k for k in os.environ if k.startswith("PIP_")]:
+    os.environ.pop(_pip_env_var, None)
+
 
 def pytest_addoption(parser):
     parser.addoption(
@@ -232,6 +246,32 @@ def isolate(tmpdir, monkeypatch):
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_AUTHOR_NAME", "pip")
     monkeypatch.setenv("GIT_AUTHOR_EMAIL", "distutils-sig@python.org")
+
+    # git >= 2.30.6 refuses to clone a submodule over the `file` transport
+    # (the CVE-2022-39253 hardening), which is exactly what the VCS tests do:
+    # they build a superproject plus a submodule under the scratch directory
+    # and then have pip clone it. A `git config --global` on the CI machine
+    # cannot reach them, because HOME is redirected above and
+    # GIT_CONFIG_NOSYSTEM is set here, so pass the setting through git's own
+    # environment-config protocol; the git commands pip itself runs inherit
+    # it too.
+    #
+    # The second setting is the Windows MAX_PATH escape hatch. Every VCS test
+    # has pip clone into its own temp directory, and that path is already deep
+    # before git adds anything to it -- pytest's per-worker tmpdir, plus the
+    # test name, plus `workspace/tmp`, plus pip's `pip-install-XXXXXXXX` and a
+    # `<name>_<32 hex>` build directory. Appending
+    # `.git/objects/pack/pack-<40 hex>.keep` then crosses 260 characters and
+    # git aborts the clone with "cannot write keep file ...: Filename too
+    # long" / "fetch-pack: invalid index-pack output", which surfaces as pip
+    # discarding the requirement ("No matching distribution found"). Git for
+    # Windows only uses the Unicode long-path APIs when core.longpaths is on;
+    # it is a no-op everywhere else, so it can be set unconditionally.
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "2")
+    monkeypatch.setenv("GIT_CONFIG_KEY_0", "protocol.file.allow")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_0", "always")
+    monkeypatch.setenv("GIT_CONFIG_KEY_1", "core.longpaths")
+    monkeypatch.setenv("GIT_CONFIG_VALUE_1", "true")
 
     # We want to disable the version check from running in the tests
     monkeypatch.setenv("PIP_DISABLE_PIP_VERSION_CHECK", "true")

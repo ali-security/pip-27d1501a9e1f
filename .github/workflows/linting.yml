@@ -1,16 +1,16 @@
 name: Linting
 
+# Not a build target: this workflow runs tox lint/docs/vendoring only (no
+# tests, no artifacts), the same TOXENVs the .travis.yml primary stage runs.
+# Dispatch-only so it never fires on the fork and costs no CI.
 on:
-  push:
-  pull_request:
-  schedule:
-  # Run every Friday at 18:02 UTC
-  - cron: 2 18 * * 5
+  workflow_dispatch:
 
 jobs:
   lint:
     name: ${{ matrix.os }}
     runs-on: ${{ matrix.os }}-latest
+    timeout-minutes: 30
     env:
       TOXENV: lint,docs,vendoring
 
