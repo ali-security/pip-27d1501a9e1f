@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import contextlib
 import errno
 import logging
 import operator
@@ -9,6 +10,7 @@ import site
 from optparse import SUPPRESS_HELP
 
 from pip._vendor import pkg_resources
+from pip._vendor.packaging.requirements import InvalidRequirement, Requirement
 from pip._vendor.packaging.utils import canonicalize_name
 
 from pip._internal.cache import WheelCache
@@ -37,7 +39,7 @@ from pip._internal.wheel_builder import build, should_build_for_install_command
 
 if MYPY_CHECK_RUNNING:
     from optparse import Values
-    from typing import Iterable, List, Optional
+    from typing import Any, Iterable, Iterator, List, Optional
 
     from pip._internal.models.format_control import FormatControl
     from pip._internal.operations.check import ConflictDetails
@@ -59,6 +61,16 @@ def get_check_binary_allowed(format_control):
         return "binary" in allowed_formats
 
     return check_binary_allowed
+
+
+def _arg_refers_to_pip(arg):
+    # type: (str) -> bool
+    """Whether a command-line argument names pip itself as a requirement."""
+    try:
+        req = Requirement(arg)
+    except InvalidRequirement:
+        return False
+    return canonicalize_name(req.name) == "pip"
 
 
 class InstallCommand(RequirementCommand):
@@ -224,6 +236,18 @@ class InstallCommand(RequirementCommand):
 
         self.parser.insert_option_group(0, index_opts)
         self.parser.insert_option_group(0, self.cmd_opts)
+
+    @contextlib.contextmanager
+    def pip_version_check(self, options, args):
+        # type: (Values, List[Any]) -> Iterator[None]
+        # Skip the self-version check when pip itself is a requirement. The
+        # running pip may be replaced mid-command, and the upgrade prompt
+        # is redundant.
+        if any(_arg_refers_to_pip(arg) for arg in args):
+            yield
+            return
+        with super(InstallCommand, self).pip_version_check(options, args):
+            yield
 
     @with_cleanup
     def run(self, options, args):

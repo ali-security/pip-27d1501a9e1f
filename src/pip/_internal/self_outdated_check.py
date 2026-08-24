@@ -1,5 +1,6 @@
 from __future__ import absolute_import
 
+import collections
 import datetime
 import hashlib
 import json
@@ -20,12 +21,18 @@ from pip._internal.utils.typing import MYPY_CHECK_RUNNING
 
 if MYPY_CHECK_RUNNING:
     import optparse
-    from typing import Any, Dict, Text, Union
+    from typing import Any, Dict, Optional, Text, Union
 
     from pip._internal.network.session import PipSession
 
 
 SELFCHECK_DATE_FMT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+# The two pip versions to advertise in the "you should upgrade" prompt. The
+# prompt is computed before a command runs and only rendered afterwards, so it
+# has to be carried across the command body as a plain value.
+UpgradePrompt = collections.namedtuple("UpgradePrompt", ["old", "new"])
 
 
 logger = logging.getLogger(__name__)
@@ -111,17 +118,23 @@ def was_installed_by_pip(pkg):
     return "pip" == get_installer(dist)
 
 
-def pip_self_version_check(session, options):
-    # type: (PipSession, optparse.Values) -> None
-    """Check for an update for pip.
+def pip_self_version_check_fetch(session, options):
+    # type: (PipSession, optparse.Values) -> Optional[UpgradePrompt]
+    """Compute the pip upgrade prompt, if any, before the command runs.
 
     Limit the frequency of checks to once per week. State is stored either in
     the active virtualenv or in the user's USER_CACHE_DIR keyed off the prefix
     of the pip script path.
+
+    Everything that inspects the environment or talks to an index happens
+    here, so that none of it runs after a command has modified the
+    environment pip itself is running from. Pair with
+    :func:`pip_self_version_check_emit`, which renders the returned prompt
+    once the command body is done.
     """
     installed_version = get_installed_version("pip")
     if not installed_version:
-        return
+        return None
 
     pip_version = packaging_version.parse(installed_version)
     pypi_version = None
@@ -161,7 +174,7 @@ def pip_self_version_check(session, options):
             )
             best_candidate = finder.find_best_candidate("pip").best_candidate
             if best_candidate is None:
-                return
+                return None
             pypi_version = str(best_candidate.version)
 
             # save that we've performed a check
@@ -177,21 +190,35 @@ def pip_self_version_check(session, options):
 
         # Determine if our pypi_version is older
         if not local_version_is_older:
-            return
+            return None
 
-        # We cannot tell how the current pip is available in the current
-        # command context, so be pragmatic here and suggest the command
-        # that's always available. This does not accommodate spaces in
-        # `sys.executable`.
-        pip_cmd = "{} -m pip".format(sys.executable)
-        logger.warning(
-            "You are using pip version %s; however, version %s is "
-            "available.\nYou should consider upgrading via the "
-            "'%s install --upgrade pip' command.",
-            pip_version, pypi_version, pip_cmd
-        )
+        return UpgradePrompt(old=str(pip_version), new=pypi_version)
     except Exception:
         logger.debug(
             "There was an error checking the latest version of pip",
             exc_info=True,
         )
+        return None
+
+
+def pip_self_version_check_emit(upgrade_prompt):
+    # type: (Optional[UpgradePrompt]) -> None
+    """Render the prompt computed by :func:`pip_self_version_check_fetch`.
+
+    This runs after the command body, so it must not do anything beyond
+    logging an already-computed value.
+    """
+    if upgrade_prompt is None:
+        return
+
+    # We cannot tell how the current pip is available in the current
+    # command context, so be pragmatic here and suggest the command
+    # that's always available. This does not accommodate spaces in
+    # `sys.executable`.
+    pip_cmd = "{} -m pip".format(sys.executable)
+    logger.warning(
+        "You are using pip version %s; however, version %s is "
+        "available.\nYou should consider upgrading via the "
+        "'%s install --upgrade pip' command.",
+        upgrade_prompt.old, upgrade_prompt.new, pip_cmd
+    )

@@ -1,3 +1,4 @@
+import contextlib
 import logging
 import os
 
@@ -86,14 +87,87 @@ class TestCommand(object):
         assert 'Traceback (most recent call last):' in stderr
 
 
-@patch('pip._internal.cli.req_command.Command.handle_pip_version_check')
-def test_handle_pip_version_check_called(mock_handle_version_check):
+def test_pip_version_check_called():
     """
-    Check that Command.handle_pip_version_check() is called.
+    Check that Command.pip_version_check() is called.
     """
-    cmd = FakeCommand()
+    entered = []
+
+    @contextlib.contextmanager
+    def fake_pip_version_check(options, args):
+        entered.append(True)
+        yield
+
+    with patch(
+        'pip._internal.cli.req_command.Command.pip_version_check',
+        side_effect=fake_pip_version_check,
+    ) as mock_version_check:
+        cmd = FakeCommand()
+        cmd.main([])
+
+    mock_version_check.assert_called_once()
+    # The mock has to be used as a context manager, not merely called.
+    assert entered == [True]
+
+
+def test_pip_version_check_wraps_the_command_body():
+    """
+    The self-version check must bracket the command body rather than trail
+    it.
+
+    Anything the check does after the body has run happens in an
+    environment the command itself may just have rewritten -- for
+    ``pip install`` that means site-packages the command has already
+    populated with attacker-controlled code (CVE-2026-6357). Everything the
+    check needs is therefore gathered before ``run()`` and only rendered
+    afterwards.
+    """
+    events = []
+
+    class VersionCheckCommand(FakeCommand):
+
+        _name = 'fake_version_check'
+
+        @contextlib.contextmanager
+        def pip_version_check(self, options, args):
+            events.append('fetch')
+            try:
+                yield
+            finally:
+                events.append('emit')
+
+    def run_func():
+        events.append('run')
+        return SUCCESS
+
+    cmd = VersionCheckCommand(run_func=run_func)
+    assert cmd.main([]) == SUCCESS
+    assert events == ['fetch', 'run', 'emit']
+
+
+def test_pip_version_check_wraps_the_command_body_on_failure():
+    """The emit half still runs when the command body raises."""
+    events = []
+
+    class VersionCheckCommand(FakeCommand):
+
+        _name = 'fake_version_check_error'
+
+        @contextlib.contextmanager
+        def pip_version_check(self, options, args):
+            events.append('fetch')
+            try:
+                yield
+            finally:
+                events.append('emit')
+
+    def run_func():
+        events.append('run')
+        raise SystemExit(1)
+
+    cmd = VersionCheckCommand(run_func=run_func)
     cmd.main([])
-    mock_handle_version_check.assert_called_once()
+    assert events == ['fetch', 'run', 'emit']
 
 
 def test_log_command_success(fixed_time, tmpdir):

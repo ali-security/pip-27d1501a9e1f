@@ -11,8 +11,10 @@ from pip._internal import self_outdated_check
 from pip._internal.models.candidate import InstallationCandidate
 from pip._internal.self_outdated_check import (
     SelfCheckState,
+    UpgradePrompt,
     logger,
-    pip_self_version_check,
+    pip_self_version_check_emit,
+    pip_self_version_check_fetch,
 )
 from tests.lib.path import Path
 
@@ -59,7 +61,7 @@ class MockDistribution(object):
 
 def _options():
     ''' Some default options that we pass to
-    self_outdated_check.pip_self_version_check '''
+    self_outdated_check.pip_self_version_check_fetch '''
     return pretend.stub(
         find_links=[], index_url='default_url', extra_index_urls=[],
         no_index=False, pre=False, cache_dir='',
@@ -116,11 +118,15 @@ def test_pip_self_version_check(monkeypatch, stored_time, installed_ver,
             "pip._vendor.requests.packages.urllib3.packages.six.moves",
         ]
     ):
-        latest_pypi_version = pip_self_version_check(None, _options())
+        upgrade_prompt = pip_self_version_check_fetch(None, _options())
+        # Nothing has been rendered yet: the fetch half runs before the
+        # command body and the emit half after it.
+        assert logger.warning.calls == []
+        pip_self_version_check_emit(upgrade_prompt)
 
     # See we return None if not installed_version
     if not installed_ver:
-        assert not latest_pypi_version
+        assert upgrade_prompt is None
     # See that we saved the correct version
     elif check_if_upgrade_required:
         assert fake_state.save.calls == [
@@ -134,9 +140,89 @@ def test_pip_self_version_check(monkeypatch, stored_time, installed_ver,
 
     # Ensure we warn the user or not
     if check_warn_logs:
+        assert upgrade_prompt == UpgradePrompt(old=installed_ver, new=new_ver)
         assert len(logger.warning.calls) == 1
     else:
         assert len(logger.warning.calls) == 0
+
+
+def test_pip_self_version_check_fetch_is_silent(monkeypatch):
+    """The fetch half computes the prompt but must not render it.
+
+    It runs before the command body, so anything it printed would appear
+    ahead of the command's own output.
+    """
+    monkeypatch.setattr(self_outdated_check, 'get_installed_version',
+                        lambda name: '1.0')
+    monkeypatch.setattr(self_outdated_check, 'PackageFinder',
+                        MockPackageFinder)
+    monkeypatch.setattr(self_outdated_check, 'get_distribution',
+                        lambda name: MockDistribution('pip'))
+    monkeypatch.setattr(logger, 'warning',
+                        pretend.call_recorder(lambda *a, **kw: None))
+
+    fake_state = pretend.stub(
+        state={},
+        save=pretend.call_recorder(lambda v, t: None),
+    )
+    monkeypatch.setattr(
+        self_outdated_check, 'SelfCheckState', lambda **kw: fake_state
+    )
+
+    upgrade_prompt = pip_self_version_check_fetch(None, _options())
+
+    assert upgrade_prompt == UpgradePrompt(old='1.0', new='6.9.0')
+    assert logger.warning.calls == []
+
+
+def test_pip_self_version_check_emit_logs_prompt(monkeypatch):
+    monkeypatch.setattr(logger, 'warning',
+                        pretend.call_recorder(lambda *a, **kw: None))
+
+    pip_self_version_check_emit(UpgradePrompt(old='1.0', new='6.9.0'))
+
+    assert len(logger.warning.calls) == 1
+    args = logger.warning.calls[0].args
+    assert args[1] == '1.0'
+    assert args[2] == '6.9.0'
+
+
+def test_pip_self_version_check_emit_no_prompt_is_silent(monkeypatch):
+    monkeypatch.setattr(logger, 'warning',
+                        pretend.call_recorder(lambda *a, **kw: None))
+
+    pip_self_version_check_emit(None)
+
+    assert logger.warning.calls == []
+
+
+def test_pip_self_version_check_emit_touches_nothing(monkeypatch):
+    """The emit half must do nothing but log an already-computed value.
+
+    It runs after the command body, i.e. after ``pip install`` may have
+    rewritten site-packages, so any index lookup, state-file access or
+    installed-distribution inspection performed here would run
+    attacker-controlled code (CVE-2026-6357).
+    """
+    def explode(*args, **kwargs):
+        raise AssertionError(
+            'the emit half must not touch the environment'
+        )
+
+    monkeypatch.setattr(self_outdated_check, 'LinkCollector',
+                        pretend.stub(create=explode))
+    monkeypatch.setattr(self_outdated_check, 'PackageFinder',
+                        pretend.stub(create=explode))
+    monkeypatch.setattr(self_outdated_check, 'SelfCheckState', explode)
+    monkeypatch.setattr(self_outdated_check, 'get_installed_version', explode)
+    monkeypatch.setattr(self_outdated_check, 'get_distribution', explode)
+    monkeypatch.setattr(self_outdated_check, 'was_installed_by_pip', explode)
+    monkeypatch.setattr(logger, 'warning',
+                        pretend.call_recorder(lambda *a, **kw: None))
+
+    pip_self_version_check_emit(UpgradePrompt(old='1.0', new='6.9.0'))
+
+    assert len(logger.warning.calls) == 1
 
 
 statefile_name_case_1 = (
