@@ -141,6 +141,114 @@ def test_git_get_src_requirements(
     )
 
 
+# Characters that str.splitlines() treats as line boundaries but that
+# `git show-ref` does not: a malicious repository can embed one of these in a
+# ref name to smuggle an extra "<sha> <ref>" line into the show-ref output.
+# The last two are spelled as encoded bytes to keep this file pure ASCII.
+UNICODE_SEPARATORS = [
+    u'\x0b',                            # LINE TABULATION
+    u'\x0c',                            # FORM FEED
+    u'\x1c',                            # FILE SEPARATOR
+    u'\x1d',                            # GROUP SEPARATOR
+    u'\x1e',                            # RECORD SEPARATOR
+    u'\x85',                            # NEXT LINE
+    b'\xe2\x80\xa8'.decode('utf-8'),    # U+2028 LINE SEPARATOR
+    b'\xe2\x80\xa9'.decode('utf-8'),    # U+2029 PARAGRAPH SEPARATOR
+]
+
+
+def call_get_revision_sha(output, rev='v1.0'):
+    """
+    Call Git.get_revision_sha() against the given `git show-ref` output.
+
+    Returns the (sha, is_branch) pair, or None if pip refused to parse the
+    output (which is also a safe outcome: nothing gets installed).
+    """
+    with patch('pip._internal.vcs.git.Git.run_command') as mock_run_command:
+        mock_run_command.return_value = output
+        try:
+            return Git.get_revision_sha('/path', rev)
+        except ValueError:
+            return None
+
+
+@pytest.mark.parametrize('injected_ref', [
+    'refs/tags/v1.0',
+    'refs/remotes/origin/v1.0',
+])
+@pytest.mark.parametrize('separator', UNICODE_SEPARATORS)
+def test_git_get_revision_sha__unicode_separator(separator, injected_ref):
+    """
+    Test that a unicode separator inside a ref name cannot smuggle in an extra
+    show-ref line, and so cannot hijack the revision that gets installed.
+    """
+    good_sha = 40 * 'a'
+    evil_sha = 40 * 'b'
+    decoy_sha = 40 * 'c'
+    # `git show-ref v1.0` output for a repository that holds the legitimate
+    # v1.0 tag plus a ref whose *name* embeds what looks like a second line
+    # pointing v1.0 at the attacker's commit. show-ref sorts its output, so
+    # the malicious ref can be named so that its smuggled line comes last.
+    output = (
+        u'{} refs/tags/v1.0\n'
+        u'{} refs/tags/zzz{}{} {}\n'
+    ).format(good_sha, decoy_sha, separator, evil_sha, injected_ref)
+
+    result = call_get_revision_sha(output)
+
+    assert result != (evil_sha, False)
+    assert result != (evil_sha, True)
+    # Either the legitimate tag wins, or the line is rejected outright.
+    assert result in [(good_sha, False), None]
+
+
+@pytest.mark.parametrize('output_template', [
+    # Unix line endings.
+    u'{} refs/remotes/origin/v1.0\n{} refs/tags/v1.0\n',
+    # Windows line endings, which git can emit for its own output.
+    u'{} refs/remotes/origin/v1.0\r\n{} refs/tags/v1.0\r\n',
+    # Blank lines are skipped, whichever line ending they use.
+    u'{} refs/remotes/origin/v1.0\n\n{} refs/tags/v1.0\n',
+    u'{} refs/remotes/origin/v1.0\r\n\r\n{} refs/tags/v1.0\r\n',
+])
+def test_git_get_revision_sha__line_endings(output_template):
+    """
+    Test Git.get_revision_sha() with CRLF output and with blank lines.
+    """
+    branch_sha = 40 * 'a'
+    tag_sha = 40 * 'b'
+    output = output_template.format(branch_sha, tag_sha)
+
+    assert call_get_revision_sha(output) == (branch_sha, True)
+
+
+def test_git_get_revision_sha__tag():
+    """
+    Test Git.get_revision_sha() resolving a tag (no remote branch present).
+    """
+    head_sha = 40 * 'a'
+    tag_sha = 40 * 'b'
+    output = u'{} refs/heads/v1.0\n{} refs/tags/v1.0\n'.format(
+        head_sha, tag_sha
+    )
+
+    assert call_get_revision_sha(output) == (tag_sha, False)
+
+
+def test_git_get_revision_sha__unexpected_line():
+    """
+    Test that a line pip can't make sense of is reported, not interpreted.
+    """
+    output = u'{} refs/tags/v1.0 trailing junk\n'.format(40 * 'a')
+
+    with patch('pip._internal.vcs.git.Git.run_command') as mock_run_command:
+        mock_run_command.return_value = output
+        with pytest.raises(ValueError) as excinfo:
+            Git.get_revision_sha('/path', 'v1.0')
+
+    assert 'unexpected show-ref line' in str(excinfo.value)
+
+
 @patch('pip._internal.vcs.git.Git.get_revision_sha')
 def test_git_resolve_revision_rev_exists(get_sha_mock):
     get_sha_mock.return_value = ('123456', False)
